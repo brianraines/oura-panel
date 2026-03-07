@@ -1,6 +1,7 @@
 # Secrets
 include/secrets.h
 src/secrets.cpp
+# Local OAuth helper copied from scripts/authorize.example.py
 scripts/authorize.py
 
 # PlatformIO

@@ -73,17 +73,21 @@ const char* OURA_REFRESH_TOKEN = "your-refresh-token-here";
 
 ### 4. Authorize & Get Your Refresh Token
 
-Run the authorization helper script on your computer (one-time):
+Create a local authorization helper from the tracked example, then run it on your computer (one-time):
 
 ```sh
+cp scripts/authorize.example.py scripts/authorize.py
+# edit CLIENT_ID and CLIENT_SECRET in scripts/authorize.py
 python3 scripts/authorize.py
 ```
+
+The local `scripts/authorize.py` file is intentionally gitignored so you can put your Oura OAuth client credentials in it without committing them.
 
 This opens your browser to Oura's consent page. After you grant access, the script prints a refresh token. Paste it into `src/secrets.cpp` as the `OURA_REFRESH_TOKEN` value.
 
 The ESP32 uses this refresh token to obtain access tokens automatically on every boot. Tokens are persisted in NVS, so subsequent boots reuse them without hitting the API. If the refresh token is ever revoked, re-run the script.
 
-`scripts/authorize.py` currently uses only the Python standard library, so no extra Python packages are required.
+The example/local authorization script uses only the Python standard library, so no extra Python packages are required.
 
 > **Note:** Applications are limited to **10 users** before requiring [approval from Oura](mailto:api-support@ouraring.com). There is no limit after approval.
 
