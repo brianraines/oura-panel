@@ -1,5 +1,10 @@
-# Prerequisites
-*.d
+# Secrets
+include/secrets.h
+src/secrets.cpp
+scripts/authorize.py
+
+# PlatformIO
+.pio/
 
 # Compiled Object files
 *.slo
@@ -22,10 +27,6 @@
 *.dylib
 *.dll
 
-# Fortran module files
-*.mod
-*.smod
-
 # Compiled Static libraries
 *.lai
 *.la
@@ -37,5 +38,5 @@
 *.out
 *.app
 
-# debug information files
-*.dwo
+# Snyk Security Extension - AI Rules (auto-generated)
+.cursor/rules/snyk_rules.mdc
