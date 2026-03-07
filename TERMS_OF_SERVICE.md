@@ -92,4 +92,4 @@ These Terms, together with the [Privacy Policy](PRIVACY_POLICY.md) and any appli
 
 ## 16. Contact
 
-If you have questions about these Terms, please open an issue on the [OuraPanel GitHub repository](https://github.com/yourusername/OuraPanel/issues).
+If you have questions about these Terms, please open an issue on the [OuraPanel GitHub repository](https://github.com/brianraines/OuraPanel/issues).
