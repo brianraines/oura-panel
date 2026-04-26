@@ -12,5 +12,6 @@ void drawIconSunset(int x, int y, int s, uint16_t color);
 void drawIconWind(int x, int y, int s, uint16_t color);
 void drawIconClock(int x, int y, int s, uint16_t color);
 void drawIconWatch(int x, int y, int s, uint16_t color);
+void drawIconWifiOff(int x, int y, int s, uint16_t color);
 
 #endif

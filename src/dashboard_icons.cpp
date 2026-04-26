@@ -55,6 +55,7 @@
 #include "icons/feather/black/64x64/sunrise64x64.h"
 #include "icons/feather/black/64x64/sunset64x64.h"
 #include "icons/feather/black/64x64/watch64x64.h"
+#include "icons/feather/black/64x64/wifi-off64x64.h"
 #include "icons/feather/black/64x64/wind64x64.h"
 #include "icons/feather/black/64x64/zap64x64.h"
 #include "icons/feather/black/96x96/activity96x96.h"
@@ -262,6 +263,13 @@ static void drawWatchBySize(int requestedSize, int x, int y, uint16_t color) {
   }
 }
 
+static void drawWifiOffBySize(int requestedSize, int x, int y, uint16_t color) {
+  switch (chooseIconSize(requestedSize)) {
+    case 64: drawIconCentered(wifi_off64x64, 64, 64, x, y, color); break;
+    default: drawIconCentered(wifi_off64x64, 64, 64, x, y, color); break;
+  }
+}
+
 void drawIconMoon(int x, int y, int r, uint16_t color) {
   drawMoonBySize(r, x, y, color);
 }
@@ -296,4 +304,8 @@ void drawIconClock(int x, int y, int s, uint16_t color) {
 
 void drawIconWatch(int x, int y, int s, uint16_t color) {
   drawWatchBySize(s, x, y, color);
+}
+
+void drawIconWifiOff(int x, int y, int s, uint16_t color) {
+  drawWifiOffBySize(s, x, y, color);
 }

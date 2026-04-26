@@ -10,7 +10,9 @@
 #include <GxEPD2_7c.h>
 #include <Fonts/FreeSansBold12pt7b.h>
 
+#include "dashboard_color_config.h"
 #include "dashboard_layout.h"
+#include "dashboard_icons.h"
 #include "oura_api.h"
 #include "secrets.h"
 
@@ -30,9 +32,12 @@ static const int H = 480;
 static const char* NTP_SERVER     = "pool.ntp.org";
 static const long  UTC_OFFSET_SEC = -6 * 3600;
 static const int   DST_OFFSET_SEC = 3600;
-static const int   SLEEP_INTERVAL_MINUTES = 10;
+static const int   ACTIVE_REFRESH_INTERVAL_MINUTES = 30;
+static const int   INACTIVE_REFRESH_INTERVAL_MINUTES = 60;
 static const int   REFRESH_START_HOUR = 8;
 static const int   REFRESH_END_HOUR = 20;
+static const int   WIFI_CONNECT_TIMEOUT_MS = 90000;
+static const int   WIFI_POLL_INTERVAL_MS = 500;
 
 static int readBatteryPct() {
   pinMode(BATT_PIN, INPUT);
@@ -94,25 +99,8 @@ static bool isWithinRefreshWindow(const struct tm& t) {
   return t.tm_hour >= REFRESH_START_HOUR && t.tm_hour < REFRESH_END_HOUR;
 }
 
-static int secondsUntilNextRefreshWindow(const struct tm& now) {
-  struct tm next = now;
-  next.tm_sec = 0;
-
-  if (now.tm_hour < REFRESH_START_HOUR) {
-    next.tm_hour = REFRESH_START_HOUR;
-    next.tm_min = 0;
-  } else {
-    next.tm_mday += 1;
-    next.tm_hour = REFRESH_START_HOUR;
-    next.tm_min = 0;
-  }
-
-  time_t nowEpoch = mktime(const_cast<struct tm*>(&now));
-  time_t nextEpoch = mktime(&next);
-  if (nowEpoch < 0 || nextEpoch <= nowEpoch) {
-    return SLEEP_INTERVAL_MINUTES * 60;
-  }
-  return (int)(nextEpoch - nowEpoch);
+static int refreshIntervalMinutesFor(const struct tm& t) {
+  return isWithinRefreshWindow(t) ? ACTIVE_REFRESH_INTERVAL_MINUTES : INACTIVE_REFRESH_INTERVAL_MINUTES;
 }
 
 static void drawCenteredText(const String& text, const GFXfont* font, uint16_t color, int y) {
@@ -124,37 +112,120 @@ static void drawCenteredText(const String& text, const GFXfont* font, uint16_t c
   display.print(text);
 }
 
+static void showStatusScreen(const String& title, const String& subtitle, uint16_t titleColor) {
+  display.setFullWindow();
+  display.firstPage();
+  do {
+    display.fillScreen(GxEPD_WHITE);
+    drawCenteredText(title, &FreeSansBold12pt7b, titleColor, H / 2 - 12);
+    drawCenteredText(subtitle, &FreeSansBold12pt7b, GxEPD_BLACK, H / 2 + 22);
+  } while (display.nextPage());
+}
+
+static void showWifiErrorScreen(const String& ssid) {
+  display.setFullWindow();
+  display.firstPage();
+  do {
+    display.fillScreen(GxEPD_WHITE);
+    drawIconWifiOff(W / 2, H / 2 - 88, 64, DashboardColorConfig::RED);
+    drawCenteredText("WiFi failed", &FreeSansBold12pt7b, DashboardColorConfig::RED, H / 2 + 8);
+    drawCenteredText(ssid, &FreeSansBold12pt7b, GxEPD_BLACK, H / 2 + 42);
+    drawCenteredText("Check SSID or signal", &FreeSansBold12pt7b, DashboardColorConfig::DARKGREY, H / 2 + 76);
+  } while (display.nextPage());
+}
+
+static const char* wifiStatusLabel(wl_status_t status) {
+  switch (status) {
+    case WL_IDLE_STATUS: return "IDLE";
+    case WL_NO_SSID_AVAIL: return "NO_SSID";
+    case WL_SCAN_COMPLETED: return "SCAN_DONE";
+    case WL_CONNECTED: return "CONNECTED";
+    case WL_CONNECT_FAILED: return "CONNECT_FAILED";
+    case WL_CONNECTION_LOST: return "CONNECTION_LOST";
+    case WL_DISCONNECTED: return "DISCONNECTED";
+    default: return "UNKNOWN";
+  }
+}
+
+static String authFailureActionMessage(const String& status) {
+  if (status.indexOf("No refresh token") >= 0 ||
+      status.indexOf("Bootstrap refresh token is empty") >= 0 ||
+      status.indexOf("Refresh skipped: no refresh token") >= 0) {
+    return "Add token in secrets.cpp";
+  }
+
+  if (status.indexOf("HTTP 400") >= 0 || status.indexOf("HTTP 401") >= 0) {
+    return "Run authorize.py again";
+  }
+
+  if (status.indexOf("NVS") >= 0) {
+    return "Clear NVS, then reboot";
+  }
+
+  return "Open serial for auth cause";
+}
+
+static bool tryWifiConnect(const char* phase, bool eraseStoredAp) {
+  Serial.printf("[WIFI] %s: connecting to %s\n", phase, WIFI_SSID);
+
+  if (eraseStoredAp) {
+    Serial.println("[WIFI] Clearing stored AP credentials from NVS");
+    WiFi.disconnect(true, true);
+    delay(300);
+  } else {
+    WiFi.disconnect(true);
+    delay(100);
+  }
+
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.persistent(false);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  uint32_t start = millis();
+  wl_status_t lastStatus = WiFi.status();
+  Serial.printf("[WIFI] Initial status=%s (%d)\n", wifiStatusLabel(lastStatus), (int)lastStatus);
+
+  while (lastStatus != WL_CONNECTED && (millis() - start) < WIFI_CONNECT_TIMEOUT_MS) {
+    delay(WIFI_POLL_INTERVAL_MS);
+    wl_status_t status = WiFi.status();
+    Serial.print(".");
+    if (status != lastStatus) {
+      Serial.printf("\n[WIFI] Status=%s (%d)\n", wifiStatusLabel(status), (int)status);
+      lastStatus = status;
+    }
+  }
+  Serial.println();
+
+  wl_status_t finalStatus = WiFi.status();
+  if (finalStatus == WL_CONNECTED) {
+    Serial.printf("[WIFI] Connected — %s\n", WiFi.localIP().toString().c_str());
+    return true;
+  }
+
+  Serial.printf("[WIFI] %s failed after %lu ms. Final status=%s (%d)\n",
+                phase, (unsigned long)(millis() - start), wifiStatusLabel(finalStatus), (int)finalStatus);
+  return false;
+}
+
 static void enterDeepSleep() {
   struct tm t;
-  uint64_t sleepUs = (uint64_t)SLEEP_INTERVAL_MINUTES * 60ULL * 1000000ULL;
+  uint64_t sleepUs = (uint64_t)INACTIVE_REFRESH_INTERVAL_MINUTES * 60ULL * 1000000ULL;
   if (getLocalTime(&t, 1000)) {
-    int sleepSeconds = 0;
-    if (isWithinRefreshWindow(t)) {
-      int secondsPastBoundary = (t.tm_min % SLEEP_INTERVAL_MINUTES) * 60 + t.tm_sec;
-      int secondsUntilNextBoundary = SLEEP_INTERVAL_MINUTES * 60 - secondsPastBoundary;
-      if (secondsUntilNextBoundary <= 0) {
-        secondsUntilNextBoundary = SLEEP_INTERVAL_MINUTES * 60;
-      }
-
-      int nextMinute = t.tm_min + (secondsUntilNextBoundary / 60);
-      int nextHour = t.tm_hour + (nextMinute / 60);
-      if (nextHour >= REFRESH_END_HOUR) {
-        sleepSeconds = secondsUntilNextRefreshWindow(t);
-        Serial.printf("[SLEEP] Outside refresh window after this cycle, sleeping until %02d:00 in %d seconds...\n",
-                      REFRESH_START_HOUR, sleepSeconds);
-      } else {
-        sleepSeconds = secondsUntilNextBoundary;
-        Serial.printf("[SLEEP] Sleeping until next %d-minute mark in %d seconds...\n", SLEEP_INTERVAL_MINUTES,
-                      sleepSeconds);
-      }
-    } else {
-      sleepSeconds = secondsUntilNextRefreshWindow(t);
-      Serial.printf("[SLEEP] Outside refresh window, sleeping until %02d:00 in %d seconds...\n",
-                    REFRESH_START_HOUR, sleepSeconds);
+    int intervalMinutes = refreshIntervalMinutesFor(t);
+    int secondsPastBoundary = (t.tm_min % intervalMinutes) * 60 + t.tm_sec;
+    int sleepSeconds = intervalMinutes * 60 - secondsPastBoundary;
+    if (sleepSeconds <= 0) {
+      sleepSeconds = intervalMinutes * 60;
     }
+
+    Serial.printf("[SLEEP] %s refresh interval: sleeping until next %d-minute mark in %d seconds...\n",
+                  isWithinRefreshWindow(t) ? "Active-window" : "Off-hours",
+                  intervalMinutes,
+                  sleepSeconds);
     sleepUs = (uint64_t)sleepSeconds * 1000000ULL;
   } else {
-    Serial.printf("[SLEEP] Time unavailable, sleeping for %d minutes...\n", SLEEP_INTERVAL_MINUTES);
+    Serial.printf("[SLEEP] Time unavailable, sleeping for %d minutes...\n", INACTIVE_REFRESH_INTERVAL_MINUTES);
   }
   Serial.flush();
   esp_deep_sleep(sleepUs);
@@ -170,47 +241,30 @@ void setup() {
   int battPct = readBatteryPct();
   Serial.printf("[BAT] Battery: %d%%\n", battPct);
 
-  Serial.printf("[WIFI] Connecting to %s", WIFI_SSID);
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  int retries = 0;
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-    if (++retries > 40) {
-      Serial.println("\n[WIFI] Failed — restarting");
-      ESP.restart();
-    }
-  }
-  Serial.println();
-  Serial.printf("[WIFI] Connected — %s\n", WiFi.localIP().toString().c_str());
-
-  String today = getTodayDate();
-  struct tm now;
-  if (!getLocalTime(&now, 1000) || !isWithinRefreshWindow(now)) {
-    Serial.printf("[SCHED] Outside refresh window (%02d:00-%02d:00); skipping refresh.\n",
-                  REFRESH_START_HOUR, REFRESH_END_HOUR);
+  if (!tryWifiConnect("Attempt 1", false) && !tryWifiConnect("Attempt 2 (forced clear)", true)) {
+    Serial.println("[WIFI] Failed - showing error screen and sleeping");
+    showWifiErrorScreen(String(WIFI_SSID));
     display.hibernate();
     WiFi.disconnect(true);
     enterDeepSleep();
   }
 
+  String today = getTodayDate();
+
   String trendStartDate = getDateDaysAgo(15);
 
   loadTokens();
+  if (usingBootstrapRefreshToken()) {
+    Serial.println("[AUTH] Warning: using bootstrap token from secrets; NVS token missing");
+  }
   if (!refreshAccessToken()) {
-    Serial.println("[AUTH] Primary token refresh failed");
-    if (!(useSeedRefreshToken() && refreshAccessToken())) {
-      Serial.println("[AUTH] Failed — check secrets.h / run scripts/authorize.py");
-      display.setFullWindow();
-      display.firstPage();
-      do {
-        display.fillScreen(GxEPD_WHITE);
-        drawCenteredText("Auth failed - check serial", &FreeSansBold12pt7b, GxEPD_RED, H / 2);
-      } while (display.nextPage());
-      display.hibernate();
-      enterDeepSleep();
-    }
+    Serial.println("[AUTH] Refresh failed");
+    const String authStatus = getAuthStatusMessage();
+    Serial.printf("[AUTH] Status: %s\n", authStatus.c_str());
+    Serial.println("[AUTH] Re-authorize only if NVS is empty or the token chain was revoked.");
+    showStatusScreen("Auth failed", authFailureActionMessage(authStatus), GxEPD_RED);
+    display.hibernate();
+    enterDeepSleep();
   }
 
   DashboardData data = fetchDashboardData(today, trendStartDate);

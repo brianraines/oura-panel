@@ -15,11 +15,15 @@ static const int HTTP_READ_TIMEOUT_MS    = 15000;
 static const int HTTP_TRANSIENT_RETRIES  = 1;
 static const int HTTP_TRANSIENT_BACKOFF_MS = 500;
 static const int HR_ONE_HOUR_BINS = 60; // 1-minute buckets across the past hour
+static const char* OURA_PREFS_NAMESPACE = "oura";
+static const char* OURA_PREFS_BOOT_COUNT_KEY = "boot_count";
+static const char* OURA_PREFS_TOKEN_WRITES_KEY = "tok_writes";
 
 static Preferences prefs;
 static String accessToken;
 static String refreshToken;
 static bool refreshTokenFromNvs = false;
+static String authStatusMessage = "Auth not started";
 static long hrBinSumBuf[MAX_HR_PLOT_POINTS];
 static int hrBinCntBuf[MAX_HR_PLOT_POINTS];
 static int hrBinMinBuf[MAX_HR_PLOT_POINTS];
@@ -88,6 +92,29 @@ static int findTrendIndexByDay(const DashboardData& d, const String& day) {
   return -1;
 }
 
+static bool sleepEntryHasDetail(JsonObject obj) {
+  return !obj["bedtime_start"].isNull() ||
+         !obj["bedtime_end"].isNull() ||
+         !obj["total_sleep_duration"].isNull() ||
+         !obj["time_in_bed"].isNull();
+}
+
+static bool isPrimarySleepType(const String& type) {
+  return type.length() == 0 ||
+         type == "long_sleep" ||
+         type == "main_sleep" ||
+         type == "core_sleep";
+}
+
+static String summarizePayload(const String& payload, size_t maxLen = 200) {
+  String compact = payload;
+  compact.replace("\r", " ");
+  compact.replace("\n", " ");
+  compact.trim();
+  if (compact.length() <= (int)maxLen) return compact;
+  return compact.substring(0, maxLen) + "...";
+}
+
 static int64_t daysFromCivil(int y, unsigned m, unsigned d) {
   y -= m <= 2;
   const int era = (y >= 0 ? y : y - 399) / 400;
@@ -112,31 +139,71 @@ static time_t parseIsoTimestampToEpoch(const String& ts) {
 // Token persistence (ESP32 NVS)
 // ---------------------------------------------------------------------------
 
-static void saveTokens() {
-  prefs.begin("oura", false);
-  prefs.putString("access", accessToken);
-  prefs.putString("refresh", refreshToken);
+static String tokenSummary(const String& token) {
+  if (token.length() < 8) return String("len=") + token.length();
+  return String("len=") + token.length() +
+         ", suffix=" + token.substring(token.length() - 6);
+}
+
+static bool saveTokens() {
+  if (!prefs.begin(OURA_PREFS_NAMESPACE, false)) {
+    authStatusMessage = "NVS open for write failed";
+    Serial.println("[AUTH] NVS write-open failed");
+    return false;
+  }
+
+  const bool accessSaved = prefs.putString("access", accessToken) == accessToken.length();
+  const bool refreshSaved = prefs.putString("refresh", refreshToken) == refreshToken.length();
+  const uint32_t priorWriteCount = prefs.getUInt(OURA_PREFS_TOKEN_WRITES_KEY, 0);
+  const bool writeCountSaved =
+    prefs.putUInt(OURA_PREFS_TOKEN_WRITES_KEY, priorWriteCount + 1) == sizeof(uint32_t);
   prefs.end();
+
+  if (!accessSaved || !refreshSaved || !writeCountSaved) {
+    authStatusMessage = "NVS token save failed";
+    Serial.printf("[AUTH] NVS save failed (access=%d refresh=%d writes=%d)\n",
+                  accessSaved, refreshSaved, writeCountSaved);
+    return false;
+  }
+
+  Serial.printf("[AUTH] Saved rotated tokens to NVS (%s, writes=%lu)\n",
+                tokenSummary(refreshToken).c_str(), (unsigned long)(priorWriteCount + 1));
+  return true;
 }
 
 bool loadTokens() {
   accessToken = "";
   refreshToken = "";
   refreshTokenFromNvs = false;
+  authStatusMessage = "No refresh token loaded";
 
-  if (prefs.begin("oura", true)) {
+  if (prefs.begin(OURA_PREFS_NAMESPACE, false)) {
+    const uint32_t bootCount = prefs.getUInt(OURA_PREFS_BOOT_COUNT_KEY, 0) + 1;
+    const uint32_t tokenWriteCount = prefs.getUInt(OURA_PREFS_TOKEN_WRITES_KEY, 0);
+    const bool bootSaved = prefs.putUInt(OURA_PREFS_BOOT_COUNT_KEY, bootCount) == sizeof(uint32_t);
     refreshToken = prefs.getString("refresh", "");
     prefs.end();
+
+    Serial.printf("[AUTH] NVS stats: boots=%lu token_writes=%lu boot_save=%d refresh_present=%d\n",
+                  (unsigned long)bootCount, (unsigned long)tokenWriteCount,
+                  bootSaved, refreshToken.length() > 0);
+  } else {
+    Serial.println("[AUTH] NVS open failed while loading tokens");
   }
 
   if (refreshToken.length() > 0) {
     refreshTokenFromNvs = true;
-    Serial.println("[AUTH] Using refresh token from NVS");
-  } else {
+    authStatusMessage = "Using refresh token from NVS";
+    Serial.printf("[AUTH] Using refresh token from NVS (%s)\n", tokenSummary(refreshToken).c_str());
+  } else if (String(OURA_REFRESH_TOKEN).length() > 0) {
     refreshToken = OURA_REFRESH_TOKEN;
-    Serial.println("[AUTH] Using seed refresh token from secrets.h");
+    authStatusMessage = "Using bootstrap refresh token from secrets";
+    Serial.printf("[AUTH] Using bootstrap refresh token from secrets (%s)\n",
+                  tokenSummary(refreshToken).c_str());
+  } else {
+    authStatusMessage = "No refresh token in NVS or secrets";
+    Serial.println("[AUTH] No refresh token in NVS or secrets");
   }
-  Serial.printf("[AUTH] Refresh token: %s\n", refreshToken.c_str());
   return refreshToken.length() > 0;
 }
 
@@ -150,13 +217,23 @@ bool useSeedRefreshToken() {
   refreshTokenFromNvs = false;
 
   if (refreshToken.length() == 0) {
-    Serial.println("[AUTH] Seed refresh token is empty");
+    authStatusMessage = "Bootstrap refresh token is empty";
+    Serial.println("[AUTH] Bootstrap refresh token is empty");
     return false;
   }
 
-  Serial.println("[AUTH] Falling back to seed refresh token from secrets.h");
-  Serial.printf("[AUTH] Refresh token: %s\n", refreshToken.c_str());
+  authStatusMessage = "Using bootstrap refresh token from secrets";
+  Serial.printf("[AUTH] Using bootstrap refresh token from secrets (%s)\n",
+                tokenSummary(refreshToken).c_str());
   return true;
+}
+
+String getAuthStatusMessage() {
+  return authStatusMessage;
+}
+
+bool usingBootstrapRefreshToken() {
+  return !refreshTokenFromNvs && refreshToken.length() > 0;
 }
 
 
@@ -166,7 +243,10 @@ bool useSeedRefreshToken() {
 // ---------------------------------------------------------------------------
 
 bool refreshAccessToken() {
-  if (refreshToken.length() == 0) return false;
+  if (refreshToken.length() == 0) {
+    authStatusMessage = "Refresh skipped: no refresh token available";
+    return false;
+  }
 
   WiFiClientSecure client;
   client.setInsecure();
@@ -188,17 +268,52 @@ bool refreshAccessToken() {
 
   if (httpCode == 200) {
     JsonDocument doc;
-    deserializeJson(doc, http.getString());
+    const String responseBody = http.getString();
+    const DeserializationError err = deserializeJson(doc, responseBody);
+    if (err) {
+      authStatusMessage = String("Token JSON parse failed: ") + err.c_str();
+      Serial.printf("[AUTH] %s\n", authStatusMessage.c_str());
+      http.end();
+      return false;
+    }
+
     accessToken  = doc["access_token"].as<String>();
     refreshToken = doc["refresh_token"].as<String>();
+    if (accessToken.length() == 0 || refreshToken.length() == 0) {
+      authStatusMessage = "Token response missing access_token or refresh_token";
+      Serial.printf("[AUTH] %s\n", authStatusMessage.c_str());
+      http.end();
+      return false;
+    }
+
     Serial.printf("[AUTH] OK (expires in %d s)\n", doc["expires_in"] | 0);
-    saveTokens();
+    authStatusMessage = refreshTokenFromNvs
+      ? "Refresh succeeded using NVS token"
+      : "Refresh succeeded using bootstrap token";
+    if (!saveTokens()) {
+      http.end();
+      return false;
+    }
     http.end();
     return true;
   }
 
-  Serial.printf("[AUTH] Failed (HTTP %d): %s\n", httpCode, http.getString().c_str());
+  const String errorBody = http.getString();
+  authStatusMessage = "Refresh failed: HTTP " + String(httpCode);
+  if (errorBody.length() > 0) authStatusMessage += " " + errorBody;
+  Serial.printf("[AUTH] Failed (HTTP %d): %s\n", httpCode, errorBody.c_str());
   http.end();
+
+  if (httpCode == 400 && refreshTokenFromNvs) {
+    const String bootstrapRefreshToken = String(OURA_REFRESH_TOKEN);
+    if (bootstrapRefreshToken.length() > 0 && bootstrapRefreshToken != refreshToken) {
+      Serial.println("[AUTH] NVS refresh token rejected; retrying with bootstrap token from secrets");
+      if (useSeedRefreshToken()) {
+        return refreshAccessToken();
+      }
+    }
+  }
+
   return false;
 }
 
@@ -247,12 +362,100 @@ String apiGet(const String& path) {
       return "";
     }
 
-    Serial.printf("[API] %s → 200\n", path.c_str());
+    if (!payload.length()) {
+      Serial.printf("[API] %s → 200 (empty body)\n", path.c_str());
+    } else {
+      Serial.printf("[API] %s → 200\n", path.c_str());
+    }
     return payload;
   }
 
   Serial.printf("[API] %s → failed after token refresh\n", path.c_str());
   return "";
+}
+
+static String fetchSleepPayloadWithRetries(const String& startDate, const String& endDate, const String& targetDay) {
+  String payload = apiGet("/v2/usercollection/sleep?start_date=" + startDate + "&end_date=" + endDate);
+  if (payload.length()) return payload;
+
+  String focusedStart = prevDate(targetDay);
+  String focusedEnd = nextDate(targetDay);
+  Serial.printf("[DATA] Sleep detail: retrying focused window %s..%s\n",
+                focusedStart.c_str(), focusedEnd.c_str());
+  payload = apiGet("/v2/usercollection/sleep?start_date=" + focusedStart + "&end_date=" + focusedEnd);
+  if (payload.length()) return payload;
+
+  String previousDay = prevDate(targetDay);
+  String previousEnd = nextDate(previousDay);
+  Serial.printf("[DATA] Sleep detail: retrying previous-day window %s..%s\n",
+                previousDay.c_str(), previousEnd.c_str());
+  return apiGet("/v2/usercollection/sleep?start_date=" + previousDay + "&end_date=" + previousEnd);
+}
+
+static void applySleepTrendEntry(SleepTrend& trend, JsonObject entry) {
+  trend.timeInBed  = entry["time_in_bed"] | -1;
+  trend.awakeTime  = entry["awake_time"] | -1;
+  trend.totalSleep = entry["total_sleep_duration"] | -1;
+  trend.lightSleep = entry["light_sleep_duration"] | -1;
+  trend.remSleep   = entry["rem_sleep_duration"] | -1;
+  trend.deepSleep  = entry["deep_sleep_duration"] | -1;
+}
+
+static int populateSleepTrendDetailsFromArray(DashboardData& d, JsonArray arr) {
+  int applied = 0;
+  String lastDay;
+  for (int i = (int)arr.size() - 1; i >= 0; i--) {
+    JsonObject entry = arr[i];
+    if (!sleepEntryHasDetail(entry)) continue;
+
+    String day = entry["day"].as<String>();
+    if (day == lastDay) continue;
+    lastDay = day;
+
+    int trendIdx = findTrendIndexByDay(d, day);
+    if (trendIdx < 0) continue;
+    if (d.trends[trendIdx].timeInBed > 0) continue;
+
+    applySleepTrendEntry(d.trends[trendIdx], entry);
+    applied++;
+  }
+  return applied;
+}
+
+static int countSleepTrendDetailDays(const DashboardData& d) {
+  int count = 0;
+  for (int i = 0; i < d.trendCount; i++) {
+    if (d.trends[i].timeInBed > 0) count++;
+  }
+  return count;
+}
+
+static void backfillMissingSleepTrendDetails(DashboardData& d) {
+  int filledCount = countSleepTrendDetailDays(d);
+  if (filledCount >= d.trendCount) return;
+
+  for (int i = 0; i < d.trendCount; i++) {
+    SleepTrend& trend = d.trends[i];
+    if (trend.timeInBed > 0 || trend.day.length() == 0) continue;
+
+    String startDate = prevDate(trend.day);
+    String endDate = nextDate(trend.day);
+    String payload = apiGet("/v2/usercollection/sleep?start_date=" + startDate + "&end_date=" + endDate);
+    if (!payload.length()) continue;
+
+    JsonDocument doc;
+    if (deserializeJson(doc, payload)) continue;
+    JsonArray arr = doc["data"].as<JsonArray>();
+    if (doc["data"].isNull() || !arr.size()) continue;
+
+    int applied = populateSleepTrendDetailsFromArray(d, arr);
+    if (applied > 0) {
+      filledCount += applied;
+      Serial.printf("[DATA] Sleep trend backfill: day=%s applied=%d filled=%d/%d\n",
+                    trend.day.c_str(), applied, filledCount, d.trendCount);
+      if (filledCount >= d.trendCount) break;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -363,8 +566,9 @@ static void fetchDailySleep(DashboardData& d, const String& tenDaysAgo, const St
   if (!arr.size()) return;
 
   int todayIdx = findTodayIndex(arr, today);
-  if (todayIdx >= 0) d.sleepScore = arr[todayIdx]["score"] | -1;
-  else d.sleepScore = arr[arr.size() - 1]["score"] | -1;
+  int selectedIdx = (todayIdx >= 0) ? todayIdx : (int)arr.size() - 1;
+  d.sleepScore = arr[selectedIdx]["score"] | -1;
+  d.sleepDay = arr[selectedIdx]["day"].as<String>();
 
   int start = ((int)arr.size() > MAX_TREND_DAYS) ? (int)arr.size() - MAX_TREND_DAYS : 0;
   d.trendCount = min((int)arr.size(), MAX_TREND_DAYS);
@@ -378,24 +582,67 @@ static void fetchDailySleep(DashboardData& d, const String& tenDaysAgo, const St
 
 static void fetchSleepDetail(DashboardData& d, const String& tenDaysAgo, const String& today) {
   String endDate = nextDate(today);
-  String payload = apiGet("/v2/usercollection/sleep?start_date=" + tenDaysAgo + "&end_date=" + endDate);
-  if (!payload.length()) return;
+  String targetDay = d.sleepDay.length() > 0 ? d.sleepDay : today;
+  String payload = fetchSleepPayloadWithRetries(tenDaysAgo, endDate, targetDay);
+  if (!payload.length()) {
+    Serial.println("[DATA] Sleep detail: empty payload from /sleep endpoint after retries");
+    return;
+  }
 
   JsonDocument doc;
-  if (deserializeJson(doc, payload)) return;
+  if (deserializeJson(doc, payload)) {
+    Serial.printf("[DATA] Sleep detail: JSON parse failed, payload=%s\n",
+                  summarizePayload(payload).c_str());
+    return;
+  }
   JsonArray arr = doc["data"].as<JsonArray>();
-  if (!arr.size()) return;
+  if (doc["data"].isNull()) {
+    Serial.printf("[DATA] Sleep detail: payload missing data array, payload=%s\n",
+                  summarizePayload(payload).c_str());
+    return;
+  }
+  if (!arr.size()) {
+    Serial.printf("[DATA] Sleep detail: no records returned, payload=%s\n",
+                  summarizePayload(payload).c_str());
+    return;
+  }
 
-  // Find the latest long_sleep entry for detail metrics
   int latestIdx = -1;
   for (int i = (int)arr.size() - 1; i >= 0; i--) {
-    String type = arr[i]["type"].as<String>();
-    if (type == "long_sleep" || type.length() == 0) {
+    JsonObject entry = arr[i];
+    if (entry["day"].as<String>() == targetDay && sleepEntryHasDetail(entry)) {
       latestIdx = i;
       break;
     }
   }
-  if (latestIdx < 0) latestIdx = (int)arr.size() - 1;
+
+  if (latestIdx < 0) {
+    for (int i = (int)arr.size() - 1; i >= 0; i--) {
+      JsonObject entry = arr[i];
+      if (isPrimarySleepType(entry["type"].as<String>()) && sleepEntryHasDetail(entry)) {
+        latestIdx = i;
+        break;
+      }
+    }
+  }
+
+  if (latestIdx < 0) {
+    for (int i = (int)arr.size() - 1; i >= 0; i--) {
+      JsonObject entry = arr[i];
+      if (sleepEntryHasDetail(entry)) {
+        latestIdx = i;
+        break;
+      }
+    }
+  }
+
+  if (latestIdx < 0) {
+    latestIdx = (int)arr.size() - 1;
+    JsonObject latest = arr[latestIdx];
+    Serial.printf("[DATA] Sleep detail: no usable detail record found (last day=%s type=%s)\n",
+                  latest["day"].as<String>().c_str(),
+                  latest["type"].as<String>().c_str());
+  }
 
   JsonObject latest = arr[latestIdx];
   d.sleepDay        = latest["day"].as<String>();
@@ -426,29 +673,12 @@ static void fetchSleepDetail(DashboardData& d, const String& tenDaysAgo, const S
     d.peakHrv = maxVal;
   }
 
-  // Build per-day duration data for trends (match by day, do not assume ordering)
-  String lastDay;
-  for (int i = (int)arr.size() - 1; i >= 0; i--) {
-    String type = arr[i]["type"].as<String>();
-    if (type.length() > 0 && type != "long_sleep") continue;
+  populateSleepTrendDetailsFromArray(d, arr);
+  backfillMissingSleepTrendDetails(d);
 
-    String day = arr[i]["day"].as<String>();
-    if (day == lastDay) continue;
-    lastDay = day;
-
-    int trendIdx = findTrendIndexByDay(d, day);
-    if (trendIdx < 0) continue;
-
-    d.trends[trendIdx].timeInBed  = arr[i]["time_in_bed"] | -1;
-    d.trends[trendIdx].awakeTime  = arr[i]["awake_time"] | -1;
-    d.trends[trendIdx].totalSleep = arr[i]["total_sleep_duration"] | -1;
-    d.trends[trendIdx].lightSleep = arr[i]["light_sleep_duration"] | -1;
-    d.trends[trendIdx].remSleep   = arr[i]["rem_sleep_duration"] | -1;
-    d.trends[trendIdx].deepSleep  = arr[i]["deep_sleep_duration"] | -1;
-  }
-
-  Serial.printf("[DATA] Sleep detail: day=%s HR=%d HRV=%d peakHRV=%d eff=%d\n",
-                d.sleepDay.c_str(), d.avgHeartRate, d.avgHrv, d.peakHrv, d.efficiency);
+  Serial.printf("[DATA] Sleep detail: day=%s type=%s HR=%d HRV=%d peakHRV=%d eff=%d total=%d\n",
+                d.sleepDay.c_str(), latest["type"].as<String>().c_str(),
+                d.avgHeartRate, d.avgHrv, d.peakHrv, d.efficiency, d.totalSleep);
 }
 
 static void fetchHeartRate(DashboardData& d, const String& today) {
