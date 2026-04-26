@@ -14,6 +14,8 @@ No third-party dependencies required; uses only the Python standard library.
 
 import http.server
 import json
+import pathlib
+import re
 import sys
 import urllib.parse
 import urllib.request
@@ -33,6 +35,8 @@ TOKEN_URL = "https://api.ouraring.com/oauth/token"
 # ---------------------------------------------------------------------------
 
 auth_code = None
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+SECRETS_CPP_PATH = REPO_ROOT / "src" / "secrets.cpp"
 
 
 class CallbackHandler(http.server.BaseHTTPRequestHandler):
@@ -99,6 +103,30 @@ def api_get(url, token):
             return resp.status, json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         return e.code, {}
+
+def update_refresh_token_in_secrets(new_token):
+    """Replace OURA_REFRESH_TOKEN in src/secrets.cpp."""
+    if not SECRETS_CPP_PATH.exists():
+        raise FileNotFoundError(f"Missing secrets file: {SECRETS_CPP_PATH}")
+
+    content = SECRETS_CPP_PATH.read_text(encoding="utf-8")
+    token_line_pattern = r'(^\s*const\s+char\*\s+OURA_REFRESH_TOKEN\s*=\s*")[^"]*(";\s*$)'
+
+    def replace_token(match):
+        return f'{match.group(1)}{new_token}{match.group(2)}'
+
+    updated_content, replacements = re.subn(
+        token_line_pattern,
+        replace_token,
+        content,
+        count=1,
+        flags=re.MULTILINE,
+    )
+
+    if replacements != 1:
+        raise RuntimeError("Could not find OURA_REFRESH_TOKEN line in src/secrets.cpp")
+
+    SECRETS_CPP_PATH.write_text(updated_content, encoding="utf-8")
 
 
 def main():
@@ -167,15 +195,22 @@ def main():
     else:
         print(f"  (Could not fetch personal info: HTTP {info_status})")
 
+    try:
+        update_refresh_token_in_secrets(refresh_token)
+        print(f"[OK] Updated refresh token in {SECRETS_CPP_PATH}")
+    except Exception as e:
+        print(f"[WARN] Failed to update secrets file automatically: {e}")
+
     print()
     print("=" * 50)
-    print("  Add this to src/secrets.cpp:")
+    print("  Refresh token:")
     print("=" * 50)
     print()
     print(f'const char* OURA_REFRESH_TOKEN = "{refresh_token}";')
     print()
     print(f"  Access token expires in {expires_in} seconds.")
-    print("  The refresh token does not expire unless revoked.")
+    print("  Oura refresh tokens rotate: each refresh returns a replacement refresh token.")
+    print("  The token printed here is a bootstrap token for the device's NVS chain.")
     print()
 
 

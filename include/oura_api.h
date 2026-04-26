@@ -82,6 +82,8 @@ bool loadTokens();
 bool refreshAccessToken();
 bool hasAccessToken();
 bool useSeedRefreshToken();
+String getAuthStatusMessage();
+bool usingBootstrapRefreshToken();
 String apiGet(const String& path);
 DashboardData fetchDashboardData(const String& today, const String& tenDaysAgo);
 

@@ -48,7 +48,7 @@ src_g = src_image.convert("L")
 pixels = list(src_g.getdata())
 
 with open(outputfile, "w", encoding="utf-8") as f:
-    var = os.path.basename(outputfile).rsplit(".h", 1)[0]
+    var = os.path.basename(outputfile).rsplit(".h", 1)[0].replace("-", "_")
     width, height = src_image.size
     f.write(f"// {width} x {height}\n")
     f.write(f"const unsigned char {var}[] PROGMEM = {{\n ")

@@ -85,7 +85,9 @@ The local `scripts/authorize.py` file is intentionally gitignored so you can put
 
 This opens your browser to Oura's consent page. After you grant access, the script prints a refresh token. Paste it into `src/secrets.cpp` as the `OURA_REFRESH_TOKEN` value.
 
-The ESP32 uses this refresh token to obtain access tokens automatically on every boot. Tokens are persisted in NVS, so subsequent boots reuse them without hitting the API. If the refresh token is ever revoked, re-run the script.
+The ESP32 uses this refresh token as a bootstrap token to obtain an access token and a replacement refresh token on first boot. Oura refresh tokens are rotating and single-use, so the device must preserve the latest refresh token in NVS. After first boot, the token in `src/secrets.cpp` is stale by design and should only be used again if you intentionally re-authorize.
+
+Tokens are persisted in NVS, so normal reboots, power loss, and standard `pio run -e firebeetle2 -t upload` firmware uploads should not require re-authorization. Full flash erase operations, partition changes, NVS corruption, or revoked app access will break the token chain and require running the authorization script again.
 
 The example/local authorization script uses only the Python standard library, so no extra Python packages are required.
 
