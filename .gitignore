@@ -4,6 +4,11 @@ src/secrets.cpp
 # Local OAuth helper copied from scripts/authorize.example.py
 scripts/authorize.py
 
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
 # PlatformIO
 .pio/
 

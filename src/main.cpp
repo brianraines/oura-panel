@@ -14,6 +14,7 @@
 #include "dashboard_layout.h"
 #include "dashboard_icons.h"
 #include "oura_api.h"
+#include "oura_utils.h"
 #include "secrets.h"
 
 #define EPD_CS   13
@@ -96,11 +97,17 @@ static String getTimestamp() {
 }
 
 static bool isWithinRefreshWindow(const struct tm& t) {
-  return t.tm_hour >= REFRESH_START_HOUR && t.tm_hour < REFRESH_END_HOUR;
+  return ouraIsWithinRefreshWindowHour(t.tm_hour, REFRESH_START_HOUR, REFRESH_END_HOUR);
 }
 
 static int refreshIntervalMinutesFor(const struct tm& t) {
-  return isWithinRefreshWindow(t) ? ACTIVE_REFRESH_INTERVAL_MINUTES : INACTIVE_REFRESH_INTERVAL_MINUTES;
+  return ouraRefreshIntervalMinutesForHour(
+    t.tm_hour,
+    REFRESH_START_HOUR,
+    REFRESH_END_HOUR,
+    ACTIVE_REFRESH_INTERVAL_MINUTES,
+    INACTIVE_REFRESH_INTERVAL_MINUTES
+  );
 }
 
 static void drawCenteredText(const String& text, const GFXfont* font, uint16_t color, int y) {
