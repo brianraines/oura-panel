@@ -58,7 +58,12 @@ Copy both values. You will need them to configure OuraPanel.
 
 ### 3. Configure OuraPanel
 
-Create `src/secrets.cpp` to store your credentials and keep `include/secrets.h` as the declarations header. Both secret-bearing files are gitignored and should never be committed.
+Create `include/secrets.h` from the tracked example header, then create `src/secrets.cpp` to store your credentials. Both local secret-bearing files are gitignored and should never be committed.
+
+```cpp
+// include/secrets.h
+// Copy include/secrets.example.h to include/secrets.h.
+```
 
 ```cpp
 // src/secrets.cpp
@@ -110,6 +115,20 @@ pio device monitor -b 115200
 
 All dependencies (ArduinoJson, GxEPD2, Adafruit GFX) are managed automatically by PlatformIO via `platformio.ini`.
 
+### Tests
+
+Run host-side unit tests for shared helper logic:
+
+```sh
+pio test -e native
+```
+
+Run the firmware build smoke test:
+
+```sh
+pio run -e firebeetle2
+```
+
 ## How It Works
 
 On each boot the device:
@@ -119,11 +138,11 @@ On each boot the device:
 3. Refreshes the OAuth2 access token (or loads one from NVS)
 4. Fetches Oura data for sleep, readiness, activity, resilience, vitals, and sleep trends
 5. Renders the dashboard on the e-paper display
-6. Enters deep sleep until the next 10-minute boundary during the active window (`:00`, `:10`, `:20`, etc.)
+6. Enters deep sleep until the next configured interval boundary during the active window
 
 The e-paper display retains its image while the ESP32 sleeps, so the dashboard is always visible with near-zero power draw between refreshes.
 
-Outside the active window, the device skips refreshes and sleeps until the next `8:00am`.
+Outside the active window, the device uses the configured inactive refresh interval.
 
 ## Configuration
 
@@ -133,7 +152,8 @@ Edit these values in `src/main.cpp` to match your timezone and preferences:
 |----------|---------|-------------|
 | `UTC_OFFSET_SEC` | `-6 * 3600` | UTC offset in seconds |
 | `DST_OFFSET_SEC` | `3600` | DST adjustment (0 to disable) |
-| `SLEEP_INTERVAL_MINUTES` | `10` | Refresh cadence during active hours |
+| `ACTIVE_REFRESH_INTERVAL_MINUTES` | `30` | Refresh cadence during active hours |
+| `INACTIVE_REFRESH_INTERVAL_MINUTES` | `60` | Refresh cadence outside active hours |
 | `REFRESH_START_HOUR` | `8` | First allowed refresh hour (local time) |
 | `REFRESH_END_HOUR` | `20` | End of allowed refresh window (local time, exclusive) |
 
